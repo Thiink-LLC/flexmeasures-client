@@ -894,6 +894,7 @@ class FlexMeasuresClient:
             updates["flex_context"] = json.dumps(updates["flex_context"])
         if "flex_model" in updates:
             updates["flex_model"] = json.dumps(updates["flex_model"])
+            print(f"[DEBUG] flex_model after json.dumps: {updates['flex_model']}")
         if "sensors_to_show" in updates:
             updates["sensors_to_show"] = json.dumps(updates["sensors_to_show"])
         for key, val in updates.items():

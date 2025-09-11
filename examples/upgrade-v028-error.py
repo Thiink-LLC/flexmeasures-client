@@ -19,6 +19,7 @@ sell_sensor_name = "Sell Price"
 power_sensor_name = "Battery Power"
 grid_sensor_name = "Grid Power"
 
+start = pd.Timestamp("2025-07-07T04:00:00+02:00")
 
 async def create_asset_with_sensors(client):
     """
@@ -76,6 +77,8 @@ async def create_asset_with_sensors(client):
         },
         "site-power-capacity": "13.8kW",
         "inflexible-device-sensors": [grid["id"]],
+        "site-peak-consumption-price": [{'start': start.isoformat(), 'value': '1.831127819548872 SEK/kWh', 'duration': 'PT4H'}],
+        'site-peak-consumption': '5.56 kW',
     }
 
     # create the flex model dict
@@ -85,16 +88,23 @@ async def create_asset_with_sensors(client):
         "soc-min": 1.64,
         "soc-at-start": 16.4,
         "power-capacity": "10.0kW",
-        "round-trip-efficiency": 0.9,
-        "preferred-chargeing-sooner": True,
+        # "round-trip-efficiency": 0.9,
+        # "preferred-chargeing-sooner": True,
     }
+
+    # add the flex context and model to the asset
+    # so that they are available when we create a schedule
+    attributes = asset.get("attributes", {})
+    if isinstance(attributes, str):
+        attributes = json.loads(attributes)
+    attributes["flex_context"] = flex_context
+    attributes["flex_model"] = flex_model
 
     # add the power and price graphs
     asset = await client.update_asset(
         asset_id=asset["id"],
         updates={
-            "flex_context": flex_context,
-            # "flex_model": flex_model,
+            "attributes": attributes,
             "sensors_to_show": [
                 {"title": "Power Graph", "sensors": [grid["id"], power["id"]]},
                 {"title": "Price Graph", "sensors": [buy["id"], sell["id"]]}
@@ -102,6 +112,8 @@ async def create_asset_with_sensors(client):
         },
     )
 
+    # print(f"Asset : {asset}")
+    # print(f"Sensor ID: {power}")
 
     return asset, power
 
@@ -123,7 +135,7 @@ async def load_data_into_sensors(client, battery, start_time):
             grid_sensor = snsr
 
     # Load data into the grid sensor
-    await client.post_measurements(
+    await client.post_sensor_data(
         sensor_id=grid_sensor["id"],
         start=start_time.isoformat(),
         duration="PT4H",
@@ -132,7 +144,7 @@ async def load_data_into_sensors(client, battery, start_time):
     )
 
     # Load data into the power sensor
-    await client.post_measurements(
+    await client.post_sensor_data(
         sensor_id=power_sensor["id"],
         start=start_time.isoformat(),
         duration="PT4H",
@@ -141,7 +153,7 @@ async def load_data_into_sensors(client, battery, start_time):
     )
 
     # Load data into the buy and sell price sensors
-    await client.post_measurements(
+    await client.post_sensor_data(
         sensor_id=buy__price_sensor["id"],
         start=start_time,
         duration="PT4H",
@@ -150,29 +162,39 @@ async def load_data_into_sensors(client, battery, start_time):
     )
 
     # Load data into the sell price sensor
-    await client.post_measurements(
+    await client.post_sensor_data(
         sensor_id=sell_price_sensor["id"],
         start=start_time,
         duration="PT4H",
         values=[1, 1, 1, 1],
         unit="SEK/kWh",
     )
-    print(f"Data loaded into sensors for asset '{asset_name}'.")
+    # print(f"Data loaded into sensors for asset '{asset_name}'.")
 
 
-async def create_schedule(client, battery, start_time):
+async def create_schedule(client, battery, sensor, start_time):
     """
     Create a schedule for the battery asset.
     """
     duration = pd.Timedelta(hours=4)
-    end_time = start_time + duration
+    attributes = battery.get("attributes", {})
+    if isinstance(attributes, str):
+        attributes = json.loads(attributes)
+    flex_context = attributes.get("flex_context", {})
+    flex_model = attributes.get("flex_model", {})
+    # print(f"Flex Context when creating schedule: {json.dumps(flex_context, indent=2)}")
+    # print(f"Flex Model when creating schedule: {json.dumps(flex_model, indent=2)}")
+
     schedule = await client.trigger_and_get_schedule(
-        sensor_id=battery["id"],
-        # soc_unit="kWh",
+        # asset_id=battery["id"],
+        sensor_id=sensor["id"],
         start=start_time.isoformat(),
         duration=duration.isoformat(),
+        flex_context=flex_context,
+        flex_model=flex_model,
     )
     print(schedule)
+
 
 async def main():
     """
@@ -180,8 +202,8 @@ async def main():
     Before that, we make sure the asset (and sensor) exists.
     """
     
-    client = FlexMeasuresClient(host="localhost:5000", ssl=False, email=usr, password=pwd)
-    # client = FlexMeasuresClient(email=usr, password=pwd)
+    # client = FlexMeasuresClient(host="localhost:5000", ssl=False, email=usr, password=pwd)
+    client = FlexMeasuresClient(email=usr, password=pwd)
 
     battery = None
     power_sensor = None
@@ -195,26 +217,23 @@ async def main():
     if not battery:
         print("Creating asset with sensor ...")
         battery, power_sensor = await create_asset_with_sensors(client)
-    else:
-        answer = input(f"Asset '{asset_name}' already exists. Re-create?")
-        if answer.lower() in ["y", "yes"]:
-            await client.delete_asset(asset_id=battery["id"])
-            battery, power_sensor = await create_asset_with_sensors(client)
-        else:  # find sensor
-            sensors = await client.get_sensors(asset_id=battery["id"])
-            for snsr in sensors:
-                if snsr["name"] == power_sensor:
-                    power_sensor = snsr
-                    break
+    
+    # find sensor
+    sensors = await client.get_sensors(asset_id=battery["id"])
+    for snsr in sensors:
+        if snsr["name"] == power_sensor_name:
+            power_sensor = snsr
+            break
 
-    print(f"Asset ID: {battery['id']}")
-    # print(f"Sensor ID: {power_sensor['id']}")
+    # print(f"Asset ID: {battery}")
+    # print(f"Sensor ID: {power_sensor}")
+
 
     start_time = pd.Timestamp("2025-07-07T04:00:00+02:00")
     if battery:
         await load_data_into_sensors(client, battery, start_time)
 
-        # await create_schedule(client, battery, start_time)
+        await create_schedule(client, battery, power_sensor, start_time)
 
     await client.close()
 
