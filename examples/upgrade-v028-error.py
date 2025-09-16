@@ -77,7 +77,7 @@ async def create_asset_with_sensors(client):
         },
         "site-power-capacity": "13.8kW",
         "inflexible-device-sensors": [grid["id"]],
-        "site-peak-consumption-price": [{'start': start.isoformat(), 'value': '1.831127819548872 SEK/kWh', 'duration': 'PT4H'}],
+        "site-peak-consumption-price": [{'start': start.isoformat(), 'value': '1.831127819548872 SEK/kW', 'duration': 'PT4H'}],
         'site-peak-consumption': '5.56 kW',
     }
 
