@@ -6,6 +6,7 @@ and to send data.
 
 import asyncio
 import json
+import os
 import pandas as pd
 
 from flexmeasures_client import FlexMeasuresClient
@@ -16,7 +17,7 @@ account_id = 3
 # usr = "flex.service@thiink.com"
 # pwd = os.getenv("SECRET_KEY")
 
-asset_name = "peak_power_issue"
+asset_name = "soft_constraint"
 buy_sensor_name = "Buy Price"
 sell_sensor_name = "Sell Price"
 power_sensor_name = "Battery Power"
@@ -82,27 +83,23 @@ async def create_asset_with_sensors(client):
         },
         "site-power-capacity": "13.8kW",
         "inflexible-device-sensors": [grid["id"]],
-        # Keep one default peak-price profile on the asset.
-        # Scenario-specific contexts are passed explicitly when scheduling.
-        "site-peak-consumption-price": [
-            {
-                "start": start.isoformat(),
-                "value": "1.831127819548872 SEK/kW",
-                "duration": "PT4H",
-            }
-        ],
-        "site-peak-consumption": "3.56 kW",
+        # "site-peak-consumption-price": [{'start': (start + pd.Timedelta(hours=4)).isoformat(), 'value': '1.831127819548872 SEK/kW', 'duration': 'PT4H'}],
+        # "site-peak-consumption-price": [{'start': (start).isoformat(), 'value': '1.831127819548872 SEK/kW', 'duration': 'PT4H'}],
+        # 'site-peak-consumption': '5.56 kW',
+        "soc-minima-breach-price": "5 SEK/kWh",
     }
 
     # create the flex model dict
+    ready_time = (start + pd.Timedelta(hours=2)).isoformat()
     flex_model = {
         "soc-unit": "kWh",
-        "soc-max": 26.4,
+        "soc-max": 76.4,
         "soc-min": 1.64,
         "soc-at-start": 1.64,
         "power-capacity": "10.0kW",
+        "soc-minima": [{"datetime": ready_time, "value": "25 kWh"}],
         # "round-trip-efficiency": 0.9,
-        "preferred-chargeing-sooner": True,
+        # "preferred-chargeing-sooner": True,
     }
 
     # add the flex context and model to the asset
@@ -185,67 +182,28 @@ async def load_data_into_sensors(client, battery, start_time):
     # print(f"Data loaded into sensors for asset '{asset_name}'.")
 
 
-def build_context_single_window(base_context, start_time):
-    """Scenario A: single 4-hour peak-price window."""
-    context = dict(base_context)
-    context["site-peak-consumption-price"] = [
-        {
-            "start": start_time.isoformat(),
-            "value": "1.831127819548872 SEK/kW",
-            "duration": "PT4H",
-        }
-    ]
-    return context
-
-
-def build_context_split_windows(base_context, start_time):
-    """Scenario B: high peak-price first 2h, low peak-price next 2h."""
-    context = dict(base_context)
-    context["site-peak-consumption-price"] = [
-        {
-            "start": start_time.isoformat(),
-            "value": "5 SEK/kW",
-            "duration": "PT2H",
-        },
-        {
-            "start": (start_time + pd.Timedelta(hours=2)).isoformat(),
-            "value": "0.5 SEK/kW",
-            "duration": "PT2H",
-        },
-    ]
-    return context
-
-
-async def create_schedule_for_context(
-    client, sensor, start_time, flex_model, flex_context, scenario_name
-):
-    """Create one schedule for one explicit context scenario."""
+async def create_schedule(client, battery, sensor, start_time):
+    """
+    Create a schedule for the battery asset.
+    """
     duration = pd.Timedelta(hours=8)
-    print(f"\n--- {scenario_name} ---")
-    print(f"Flex Context: {json.dumps(flex_context, indent=2)}")
-    print(f"Flex Model: {json.dumps(flex_model, indent=2)}")
+    attributes = battery.get("attributes", {})
+    if isinstance(attributes, str):
+        attributes = json.loads(attributes)
+    flex_context = attributes.get("flex_context", {})
+    flex_model = attributes.get("flex_model", {})
+    print(f"Flex Context when creating schedule: {json.dumps(flex_context, indent=2)}")
+    print(f"Flex Model when creating schedule: {json.dumps(flex_model, indent=2)}")
 
     schedule = await client.trigger_and_get_schedule(
+        # asset_id=battery["id"],
         sensor_id=sensor["id"],
         start=start_time.isoformat(),
         duration=duration.isoformat(),
         flex_context=flex_context,
         flex_model=flex_model,
     )
-    print(f"Schedule ({scenario_name}): {schedule}")
-    return schedule
-
-
-def print_first_four_hour_comparison(schedule_a, schedule_b):
-    """Print compact side-by-side comparison for first 4 hours."""
-    values_a = schedule_a.get("values", [])[:4]
-    values_b = schedule_b.get("values", [])[:4]
-    print("\nFirst 4 hours comparison (kW):")
-    print("hour | single_4h_price | split_2h_high_2h_low")
-    for idx in range(4):
-        val_a = values_a[idx] if idx < len(values_a) else None
-        val_b = values_b[idx] if idx < len(values_b) else None
-        print(f"{idx:>4} | {val_a!s:>15} | {val_b!s:>20}")
+    print(schedule)
 
 
 async def main():
@@ -261,68 +219,34 @@ async def main():
     battery = None
     power_sensor = None
 
-    try:
-        assets = await client.get_assets(account_id=account_id)
-        # Deterministic run: remove prior test assets so no stale attributes are reused.
-        for sst in assets:
-            if sst["name"] == asset_name:
-                print(f"Deleting existing asset {asset_name} (id={sst['id']})")
-                await client.delete_asset(sst["id"], confirm_first=False)
+    assets = await client.get_assets()
+    for sst in assets:
+        print(f"Asset: {sst['name']}")
+        if sst["name"] == asset_name:
+            battery = sst
+            break
 
-        # Refresh asset list after cleanup.
-        assets = await client.get_assets(account_id=account_id)
-        for sst in assets:
-            print(f"Asset: {sst['name']}")
+    if not battery:
         print(f"Creating asset {asset_name} with sensor ...")
         battery, power_sensor = await create_asset_with_sensors(client)
+    
+    # find sensor
+    sensors = await client.get_sensors(asset_id=battery["id"])
+    for snsr in sensors:
+        if snsr["name"] == power_sensor_name:
+            power_sensor = snsr
+            break
 
-        # find sensor
-        sensors = await client.get_sensors(asset_id=battery["id"])
-        for snsr in sensors:
-            if snsr["name"] == power_sensor_name:
-                power_sensor = snsr
-                break
+    # print(f"Asset ID: {battery}")
+    # print(f"Sensor ID: {power_sensor}")
 
-        # print(f"Asset ID: {battery}")
-        # print(f"Sensor ID: {power_sensor}")
+    start_time = start
+    if battery:
+        await load_data_into_sensors(client, battery, start_time)
 
-        start_time = start
-        if battery:
-            await load_data_into_sensors(client, battery, start_time)
+        await create_schedule(client, battery, power_sensor, start_time)
 
-            attributes = battery.get("attributes", {})
-            if isinstance(attributes, str):
-                attributes = json.loads(attributes)
-            base_flex_context = attributes.get("flex_context", {})
-            flex_model = attributes.get("flex_model", {})
-
-            scenario_a_context = build_context_single_window(
-                base_flex_context, start_time
-            )
-            scenario_b_context = build_context_split_windows(
-                base_flex_context, start_time
-            )
-
-            schedule_a = await create_schedule_for_context(
-                client=client,
-                sensor=power_sensor,
-                start_time=start_time,
-                flex_model=flex_model,
-                flex_context=scenario_a_context,
-                scenario_name="Scenario A: single 4h peak price",
-            )
-            schedule_b = await create_schedule_for_context(
-                client=client,
-                sensor=power_sensor,
-                start_time=start_time,
-                flex_model=flex_model,
-                flex_context=scenario_b_context,
-                scenario_name="Scenario B: split 2h high + 2h low peak price",
-            )
-
-            print_first_four_hour_comparison(schedule_a, schedule_b)
-    finally:
-        await client.close()
+    await client.close()
 
 
 asyncio.run(main())
